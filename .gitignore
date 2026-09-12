@@ -1,0 +1,32 @@
+# Byte-compiled / cache
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build outputs
+jp.zip
+jp.zip.sha256
+source.pack
+source_in/
+extracted/
+*.7z
+*.apk
+
+# Secrets / local env (never commit)
+.env
+*.pem
+*.p12
+*.jks
+id_rsa
+id_ed25519
+*_private*
+
+# Editors
+.idea/
+.vscode/
+.DS_Store
+
+# Large game data (do not host here)
+LimbusLocalize*
+LLC_zh-CN/
