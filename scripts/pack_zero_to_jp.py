@@ -53,20 +53,22 @@ def apply_glyphs(text: str, mapping: dict[str, str], font_ok: set[str]) -> str:
     return converted
 
 
-def extract_archive(src: Path, dest: Path) -> None:
+def extract_archive(src: Path, dest: Path) -> Path:
+    """Return a directory that contains the localize tree."""
     dest.mkdir(parents=True, exist_ok=True)
+    if src.is_dir():
+        # Already extracted (CI case): use as-is, do NOT copy into empty dest.
+        return src
     suf = src.suffix.lower()
     if suf == ".zip":
         with zipfile.ZipFile(src) as zf:
             zf.extractall(dest)
-        return
+        return dest
     if suf in (".7z", ".rar"):
         if not shutil.which("7z"):
             die("need 7z binary to extract 7z/rar")
         subprocess.check_call(["7z", "x", f"-o{dest}", "-y", str(src)])
-        return
-    if src.is_dir():
-        return
+        return dest
     die(f"unsupported input type: {src}")
 
 
@@ -76,6 +78,8 @@ def find_content_root(root: Path) -> Path:
         for c in sorted(cands, key=lambda p: len(p.parts)):
             if any(c.glob("*.json")):
                 return c
+    if any(root.glob("*.json")):
+        return root
     best = None
     best_n = -1
     for p in [root, *root.rglob("*")]:
@@ -85,7 +89,9 @@ def find_content_root(root: Path) -> Path:
         if n > best_n:
             best_n = n
             best = p
-    return best or root
+    if best is None or best_n <= 0:
+        die(f"no *.json found under {root}")
+    return best
 
 
 def ensure_prefix(name: str, prefix: str) -> str:
@@ -107,14 +113,17 @@ def sha256_file(path: Path) -> str:
 def build(input_path: Path, output: Path, glyph_map: Path, font_ok: Path, prefix: str) -> None:
     mapping = load_json_map(glyph_map)
     fonts = load_font_ok(font_ok)
-    print(f"glyph_map={len(mapping)} font_ok={len(fonts)}")
+    print(f"glyph_map={len(mapping)} font_ok={len(fonts)} input={input_path}")
 
     with tempfile.TemporaryDirectory(prefix="glyph_pack_") as td:
         td_path = Path(td)
-        work = td_path / "in"
-        extract_archive(input_path, work)
+        work = extract_archive(input_path, td_path / "in")
         content = find_content_root(work)
         print(f"content_root={content}")
+        n_json = len(list(content.rglob("*.json")))
+        print(f"json_under_root={n_json}")
+        if n_json <= 0:
+            die(f"content_root has no json files: {content}")
 
         out_root = td_path / "out" / "Android" / "data" / GAME_PKG / LOCALIZE_REL / "jp"
         out_root.mkdir(parents=True, exist_ok=True)
@@ -141,7 +150,9 @@ def build(input_path: Path, output: Path, glyph_map: Path, font_ok: Path, prefix
                 dest.write_bytes(raw)
             count += 1
 
-        print(f"files={count}")
+        print(f"files_written={count}")
+        if count < 100:
+            die(f"suspiciously few files ({count}) — aborting")
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists():
             output.unlink()
@@ -152,6 +163,8 @@ def build(input_path: Path, output: Path, glyph_map: Path, font_ok: Path, prefix
                     zf.write(p, p.relative_to(out_base).as_posix())
         digest = sha256_file(output)
         print(f"output={output} size={output.stat().st_size} sha256={digest}")
+        if output.stat().st_size < 100_000:
+            die(f"output too small ({output.stat().st_size} bytes)")
         Path(str(output) + ".sha256").write_text(
             f"{digest}  {output.name}\n", encoding="utf-8"
         )
