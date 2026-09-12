@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       source_url:
-        description: "HTTPS URL of 零协 LimbusLocalize archive (.7z/.zip). You must host it; captcha sources are not supported."
-        required: true
+        description: "HTTPS URL of 零协 archive (.7z/.zip). Leave empty to use LocalizeLimbusCompany latest GitHub Release asset."
+        required: false
+        default: ""
         type: string
       publish_release:
         description: "Also create a GitHub Release with the artifact"
@@ -17,8 +18,6 @@ on:
         required: false
         default: ""
         type: string
-  release:
-    types: [published]
 
 permissions:
   contents: write
@@ -38,48 +37,86 @@ jobs:
       - name: Install 7z
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Determine source URL
+      - name: Resolve source URL
         id: src
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "url=${{ inputs.source_url }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "url=${{ github.event.release.assets[0].browser_download_url }}" >> "$GITHUB_OUTPUT"
-            echo "fallback from release assets" 
-          fi
-
-      - name: Download source
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_URL: ${{ inputs.source_url }}
         run: |
           set -euo pipefail
-          URL="${{ steps.src.outputs.url }}"
-          if [ -z "$URL" ]; then
-            echo "No source_url provided" >&2
-            exit 1
+          if [ -n "${INPUT_URL:-}" ]; then
+            echo "url=${INPUT_URL}" >> "$GITHUB_OUTPUT"
+            echo "Using provided URL"
+            exit 0
           fi
+          # Official 零协 GitHub Release asset (no captcha on api.github.com / release download)
+          api=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: limbus-glyph-zero-pack" \
+            https://api.github.com/repos/LocalizeLimbusCompany/LocalizeLimbusCompany/releases/latest)
+          echo "$api" | python3 -c "import sys,json; d=json.load(sys.stdin); print('tag', d.get('tag_name')); [print('asset', a['name'], a['size']) for a in d.get('assets') or []]"
+          url=$(echo "$api" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assets = d.get('assets') or []
+          # Prefer LimbusLocalize_*.7z / .zip (not source code, not font)
+          pick = None
+          for a in assets:
+              n = a.get('name','')
+              if n.startswith('LimbusLocalize') and n.endswith(('.7z','.zip')):
+                  pick = a['browser_download_url']
+                  break
+          if not pick:
+              for a in assets:
+                  n = a.get('name','')
+                  if n.endswith(('.7z','.zip')) and 'Font' not in n and not n.endswith('.tar.gz'):
+                      pick = a['browser_download_url']
+                      break
+          if not pick:
+              sys.exit('No LimbusLocalize .7z/.zip asset in latest release')
+          print(pick)
+          ")
+          echo "Using official release asset: $url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Download source
+        env:
+          URL: ${{ steps.src.outputs.url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
           echo "Downloading: $URL"
-          curl -fsSL -A "Mozilla/5.0" -o source.pack "$URL"
+          # Auth headers help private assets; harmless for public zero-assoc
+          curl -fsSL \
+            -H "User-Agent: limbus-glyph-zero-pack" \
+            -H "Accept: application/octet-stream" \
+            -L -o source.pack "$URL"
           ls -lh source.pack
           file source.pack || true
+          # If HTML/login page, fail clearly
+          if file source.pack | grep -qi 'HTML'; then
+            echo "Got HTML instead of archive — check URL or captcha/proxy" >&2
+            head -c 400 source.pack >&2 || true
+            exit 1
+          fi
 
-      - name: Detect archive type
-        id: type
+      - name: Detect archive type and extract
         run: |
+          set -euo pipefail
           T=$(file -b source.pack || true)
           echo "file=$T"
+          mkdir -p source_in
           if echo "$T" | grep -qi '7-zip\|RAR\|archive'; then
-            mkdir -p source_in
             7z x -y -osource_in source.pack
           elif echo "$T" | grep -qi 'Zip'; then
-            mkdir -p source_in
             unzip -q source.pack -d source_in
           else
-            mkdir -p source_in
             if ! 7z x -y -osource_in source.pack; then
               unzip -q source.pack -d source_in
             fi
           fi
-          find source_in -maxdepth 4 -type d | head -30
-          find source_in -name '*.json' | head -5
+          find source_in -maxdepth 5 -type d | head -40
+          find source_in -name 'AbDlg_Faust.json' -o -name 'AbDlg_*.json' | head -10
 
       - name: Pack jp.zip
         run: |
@@ -99,7 +136,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release
-        if: github.event_name == 'workflow_dispatch' && inputs.publish_release == true
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag_name }}
@@ -108,6 +145,5 @@ jobs:
             jp.zip
             jp.zip.sha256
           body: |
-            Generated by limbus-glyph-pack CI from a user-provided 零协 archive.
-            Glyph map: assets/glyph_map.json
-            Content license remains CC BY-NC-SA 4.0 (零协).
+            Generated from 零协 (LocalizeLimbusCompany) release asset + local glyph map.
+            Content license remains CC BY-NC-SA 4.0.
