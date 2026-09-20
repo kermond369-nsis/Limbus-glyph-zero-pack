@@ -1,29 +1,115 @@
-name: Build jp.zip
+name: Build jp.zip (auto-sync)
+
+# 自动同步：定时检查零协最新文本包；发现新版本（或本地表/脚本有改动）即自动构建并发布。
+# 手动触发可强制重建、指定源、或仅出 artifact 不发 Release。
 
 on:
+  schedule:
+    # UTC 01:00 / 13:00 = 北京 09:00 / 21:00，每天两次检查
+    - cron: '0 1,13 * * *'
   workflow_dispatch:
     inputs:
       source_url:
-        description: "HTTPS URL of 零协 archive (.7z/.zip). Leave empty to use LocalizeLimbusCompany latest GitHub Release asset."
+        description: "可选：指定零协包 HTTPS 直链（留空 = 自动取官方最新）"
         required: false
         default: ""
         type: string
-      publish_release:
-        description: "Also create a GitHub Release with the artifact"
+      force_rebuild:
+        description: "强制重建（忽略版本 / 表未变化的检查）"
         required: false
         default: false
         type: boolean
-      tag_name:
-        description: "Release tag if publishing (e.g. 2026-09-12)"
+      publish_release:
+        description: "发布 GitHub Release（手动触发时）"
         required: false
-        default: ""
-        type: string
+        default: true
+        type: boolean
+
+concurrency:
+  group: auto-build-jp
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      zero_tag: ${{ steps.rel.outputs.zero_tag }}
+      zero_url: ${{ steps.rel.outputs.zero_url }}
+      map_version: ${{ steps.check.outputs.map_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve 零协 latest package
+        id: rel
+        env:
+          INPUT_URL: ${{ inputs.source_url || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_URL:-}" ]; then
+            echo "url=${INPUT_URL}" >> "$GITHUB_OUTPUT"
+            echo "zero_url=${INPUT_URL}" >> "$GITHUB_OUTPUT"
+            echo "zero_tag=manual-$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+            echo "Using provided URL: ${INPUT_URL}"
+            exit 0
+          fi
+          # 取最近 10 个 release，找第一个含 LimbusLocalize*.7z/.zip 资产的（优先 7z）
+          api=$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "User-Agent: limbuskj-glyph-pack" \
+            "https://api.github.com/repos/LocalizeLimbusCompany/LocalizeLimbusCompany/releases?per_page=10")
+          resolved=$(echo "$api" | python3 -c "
+          import sys, json
+          rels = json.load(sys.stdin)
+          tag = url = None
+          for r in rels:
+              assets = r.get('assets') or []
+              for a in assets:
+                  n = a.get('name','')
+                  if n.startswith('LimbusLocalize') and n.endswith('.7z'):
+                      tag, url = r['tag_name'], a['browser_download_url']; break
+              if not url:
+                  for a in assets:
+                      n = a.get('name','')
+                      if n.startswith('LimbusLocalize') and n.endswith('.zip'):
+                          tag, url = r['tag_name'], a['browser_download_url']; break
+              if url: break
+          if not url:
+              sys.exit('no LimbusLocalize .7z/.zip asset found in recent releases')
+          print(tag); print(url)
+          ")
+          tag=$(echo "$resolved" | sed -n 1p)
+          url=$(echo "$resolved" | sed -n 2p)
+          echo "Zero-assoc latest: tag=$tag"
+          echo "zero_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "zero_url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Check build state (zero tag + local assets hash)
+        id: check
+        run: |
+          set -euo pipefail
+          assets_hash=$(cat assets/glyph_map.json assets/safe_charset.txt scripts/pack_zero_to_jp.py | sha256sum | cut -d' ' -f1)
+          cur="${{ steps.rel.outputs.zero_tag }}:${assets_hash}"
+          last=$(cat .build-state 2>/dev/null || echo "none")
+          mapver=$(python3 -c "import json;print(json.load(open('assets/glyph_map.json'))['version'])")
+          echo "map_version=$mapver" >> "$GITHUB_OUTPUT"
+          echo "current state : $cur"
+          echo "last state    : $last"
+          if [ "${{ inputs.force_rebuild || 'false' }}" = "true" ] || [ "$cur" != "$last" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "=> will build"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "=> up to date, skip build"
+          fi
+
   pack:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     env:
       ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
@@ -39,65 +125,20 @@ jobs:
       - name: Install 7z
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
 
-      - name: Resolve source URL
-        id: src
+      - name: Download 零协 package
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_URL: ${{ inputs.source_url }}
-        run: |
-          set -euo pipefail
-          if [ -n "${INPUT_URL:-}" ]; then
-            echo "url=${INPUT_URL}" >> "$GITHUB_OUTPUT"
-            echo "Using provided URL"
-            exit 0
-          fi
-          # Official 零协 GitHub Release asset (no captcha on api.github.com / release download)
-          api=$(curl -fsSL \
-            -H "Accept: application/vnd.github+json" \
-            -H "User-Agent: limbus-glyph-zero-pack" \
-            https://api.github.com/repos/LocalizeLimbusCompany/LocalizeLimbusCompany/releases/latest)
-          echo "$api" | python3 -c "import sys,json; d=json.load(sys.stdin); print('tag', d.get('tag_name')); [print('asset', a['name'], a['size']) for a in d.get('assets') or []]"
-          url=$(echo "$api" | python3 -c "
-          import sys, json
-          d = json.load(sys.stdin)
-          assets = d.get('assets') or []
-          # Prefer LimbusLocalize_*.7z / .zip (not source code, not font)
-          pick = None
-          for a in assets:
-              n = a.get('name','')
-              if n.startswith('LimbusLocalize') and n.endswith(('.7z','.zip')):
-                  pick = a['browser_download_url']
-                  break
-          if not pick:
-              for a in assets:
-                  n = a.get('name','')
-                  if n.endswith(('.7z','.zip')) and 'Font' not in n and not n.endswith('.tar.gz'):
-                      pick = a['browser_download_url']
-                      break
-          if not pick:
-              sys.exit('No LimbusLocalize .7z/.zip asset in latest release')
-          print(pick)
-          ")
-          echo "Using official release asset: $url"
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-
-      - name: Download source
-        env:
-          URL: ${{ steps.src.outputs.url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          URL: ${{ needs.check.outputs.zero_url }}
         run: |
           set -euo pipefail
           echo "Downloading: $URL"
-          # Auth headers help private assets; harmless for public zero-assoc
           curl -fsSL \
-            -H "User-Agent: limbus-glyph-zero-pack" \
+            -H "User-Agent: limbuskj-glyph-pack" \
             -H "Accept: application/octet-stream" \
             -L -o source.pack "$URL"
           ls -lh source.pack
           file source.pack || true
-          # If HTML/login page, fail clearly
           if file source.pack | grep -qi 'HTML'; then
-            echo "Got HTML instead of archive — check URL or captcha/proxy" >&2
+            echo "Got HTML instead of archive — abort" >&2
             head -c 400 source.pack >&2 || true
             exit 1
           fi
@@ -117,16 +158,55 @@ jobs:
               unzip -q source.pack -d source_in
             fi
           fi
-          find source_in -maxdepth 5 -type d | head -40
-          find source_in -name 'AbDlg_Faust.json' -o -name 'AbDlg_*.json' | head -10
+          find source_in -maxdepth 5 -type d | head -30
 
-      - name: Pack jp.zip
+      - name: Audit glyph map against corpus (dry-run)
+        run: python3 scripts/audit_glyph_map.py --corpus source_in
+
+      - name: Pack jp.zip (closure check is fail-fast)
         run: |
           python3 scripts/pack_zero_to_jp.py \
             --input source_in \
             --output jp.zip \
             --glyph-map assets/glyph_map.json \
-            --font-ok assets/font_ok.txt
+            --safe-charset assets/safe_charset.txt
+
+      - name: Build summary
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          r = json.load(open('jp.zip.report.json'))
+          sha = open('jp.zip.sha256').read().split()[0]
+          print("## jp.zip 构建报告")
+          print()
+          print("| 项 | 值 |")
+          print("|---|---|")
+          print("| 零协源 | ${{ needs.check.outputs.zero_tag }} |")
+          print("| 表版本 | ${{ needs.check.outputs.map_version }} |")
+          print(f"| 文件数 | {r['files']} |")
+          print(f"| 条目 | single={r['entries']['single']} / phrase={r['entries']['phrase']} |")
+          print(f"| 单字命中 | {r['single_hits_total']} |")
+          print(f"| 词组命中 | {r['phrase_hits']} |")
+          print(f"| 闭环校验 | {'PASS' if not r['outside_safe_charset'] else 'FAIL'} |")
+          print(f"| sha256 | `{sha}` |")
+          PY
+
+      - name: Update build state
+        run: |
+          set -euo pipefail
+          assets_hash=$(cat assets/glyph_map.json assets/safe_charset.txt scripts/pack_zero_to_jp.py | sha256sum | cut -d' ' -f1)
+          echo "${{ needs.check.outputs.zero_tag }}:${assets_hash}" > .build-state
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .build-state
+          if git diff --staged --quiet; then
+            echo "build state unchanged (content identical)"
+          else
+            git commit -m "chore: build state -> 零协 ${{ needs.check.outputs.zero_tag }} (map ${{ needs.check.outputs.map_version }})"
+            git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)"
+            git push
+            echo "build state updated & pushed"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -135,19 +215,31 @@ jobs:
           path: |
             jp.zip
             jp.zip.sha256
+            jp.zip.report.json
           if-no-files-found: error
 
       - name: Publish release
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_release == true && inputs.tag_name != '' }}
-        uses: softprops/action-gh-release@v2
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
         env:
-          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
-        with:
-          tag_name: ${{ inputs.tag_name }}
-          name: jp.zip ${{ inputs.tag_name }}
-          files: |
-            jp.zip
-            jp.zip.sha256
-          body: |
-            Generated from 零协 (LocalizeLimbusCompany) release asset + local glyph map.
-            Content license remains CC BY-NC-SA 4.0.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ZTAG="${{ needs.check.outputs.zero_tag }}"
+          TAG="jp-${ZTAG}"
+          MAPVER="${{ needs.check.outputs.map_version }}"
+          NOTES="自动构建：零协源 \`${ZTAG}\` · 表版本 \`${MAPVER}\` · 构建时间 $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          - \`jp.zip\`：安卓全树包（Android/data/.../Localize/jp/**），解压后覆盖到游戏目录
+          - \`jp.zip.sha256\`：校验
+          - \`jp.zip.report.json\`：替换统计报告
+
+          文本内容来自零协（CC BY-NC-SA 4.0）；字形替换表为本仓自维护。"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber jp.zip jp.zip.sha256 jp.zip.report.json
+            gh release edit "$TAG" --notes "$NOTES"
+            echo "release $TAG updated (clobber)"
+          else
+            gh release create "$TAG" --title "jp.zip · 零协 $ZTAG" --notes "$NOTES" \
+              jp.zip jp.zip.sha256 jp.zip.report.json
+            echo "release $TAG created"
+          fi
