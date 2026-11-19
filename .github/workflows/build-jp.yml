@@ -5,8 +5,8 @@ name: Build jp.zip (auto-sync)
 
 on:
   schedule:
-    # UTC 01:00 / 13:00 = 北京 09:00 / 21:00，每天两次检查
-    - cron: '0 1,13 * * *'
+    # UTC 13:23 = 北京 21:23，每天错峰检查一次
+    - cron: '23 13 * * *'
   workflow_dispatch:
     inputs:
       source_url:
@@ -31,6 +31,7 @@ concurrency:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   check:
@@ -159,7 +160,97 @@ jobs:
           find source_in -maxdepth 5 -type d | head -30
 
       - name: Audit glyph map against corpus (dry-run)
-        run: python3 scripts/audit_glyph_map.py --corpus source_in
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZTAG: ${{ needs.check.outputs.zero_tag }}
+          MAPVER: ${{ needs.check.outputs.map_version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if ! python3 scripts/audit_glyph_map.py --corpus source_in > audit_output.txt 2>&1; then
+            cat audit_output.txt
+            {
+              echo "## ❌ 字形闭环审计失败"
+              echo ""
+              echo "- 零协源：\`${ZTAG}\`"
+              echo "- 表版本：\`${MAPVER}\`"
+              echo ""
+              echo '```text'
+              cat audit_output.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            curl -fsSL -L -o ghcruise_ref.zip \
+              "https://github.com/ghcruise/LimbusCompany-IOS-Localization/releases/latest/download/localize_jp.zip" || true
+            if [ -s ghcruise_ref.zip ] && file ghcruise_ref.zip | grep -qi 'Zip'; then
+              python3 scripts/diff_from_reference.py \
+                --llc source_in \
+                --ref ghcruise_ref.zip > diff_suggest.txt 2>&1 || true
+            fi
+
+            python3 - <<'PY' > alert_issue.md
+          import os
+          from pathlib import Path
+
+          ztag = os.environ["ZTAG"]
+          mapver = os.environ["MAPVER"]
+          run_url = os.environ["RUN_URL"]
+          audit_txt = Path("audit_output.txt").read_text(encoding="utf-8", errors="replace").strip()
+          diff_p = Path("diff_suggest.txt")
+          diff_txt = diff_p.read_text(encoding="utf-8", errors="replace").strip() if diff_p.exists() else ""
+
+          print(f"自动同步流水线检测到零协新版本 **`{ztag}`** 存在未覆盖的字形或字符，闭环校验失败并已中止构建。")
+          print()
+          print(f"- **零协版本**：`{ztag}`")
+          print(f"- **当前字形表**：`{mapver}`")
+          print(f"- **构建日志**：{run_url}")
+          print()
+          print("### 审计输出（越界字符统计）")
+          print("```text")
+          print(audit_txt[:6000])
+          print("```")
+          if diff_txt:
+              print()
+              print("### 自动差分建议（对照 `ghcruise` 最新 Release）")
+              print("```text")
+              print(diff_txt[:6000])
+              print("```")
+          print()
+          print("### 本地快速修复命令")
+          print("```bash")
+          print("python3 scripts/diff_from_reference.py --llc LimbusLocalize.zip --ref localize_jp.zip --apply --new-version YYYY-MM-DD.fullN")
+          print("python3 scripts/audit_glyph_map.py --corpus LimbusLocalize.zip")
+          print("```")
+          PY
+
+            gh label create glyph-sync-alert \
+              --repo "$GITHUB_REPOSITORY" \
+              --color D93F0B \
+              --description "Automated glyph closure check alert" \
+              --force || true
+
+            ISSUE_NUM=$(gh issue list \
+              --repo "$GITHUB_REPOSITORY" \
+              --label glyph-sync-alert \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty' || true)
+
+            if [ -n "${ISSUE_NUM:-}" ]; then
+              gh issue edit "$ISSUE_NUM" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "[auto-sync] 字形闭环校验失败：零协 ${ZTAG}" \
+                --body-file alert_issue.md || true
+            else
+              gh issue create \
+                --repo "$GITHUB_REPOSITORY" \
+                --label glyph-sync-alert \
+                --title "[auto-sync] 字形闭环校验失败：零协 ${ZTAG}" \
+                --body-file alert_issue.md || true
+            fi
+            exit 1
+          fi
+          cat audit_output.txt
 
       - name: Pack jp.zip (closure check is fail-fast)
         run: |
@@ -255,3 +346,23 @@ jobs:
               jp.zip jp.zip.sha256 jp.zip.report.json
             echo "release $TAG created"
           fi
+
+      - name: Close resolved glyph-sync alert issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZTAG: ${{ needs.check.outputs.zero_tag }}
+          MAPVER: ${{ needs.check.outputs.map_version }}
+        run: |
+          set -euo pipefail
+          OPEN_ISSUES=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --label glyph-sync-alert \
+            --state open \
+            --json number \
+            --jq '.[].number' || true)
+          for num in $OPEN_ISSUES; do
+            [ -n "$num" ] || continue
+            gh issue close "$num" \
+              --repo "$GITHUB_REPOSITORY" \
+              --comment "已由零协 \`${ZTAG}\`（表版本 \`${MAPVER}\`）构建通过并恢复正常，自动关闭此告警。" || true
+          done

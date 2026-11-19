@@ -102,7 +102,8 @@ python3 scripts/audit_glyph_map.py --corpus /path/to/LimbusLocalize.zip
 ## GitHub Actions 自动同步
 
 工作流 [.github/workflows/build-jp.yml](./.github/workflows/build-jp.yml) 会在以下情况运行：
-- **定时检查（`schedule`）**：每天 UTC `01:00` 与 `13:00`（北京时间 `09:00` / `21:00`）查询零协最新 Release，仅当上游版本号或本地表/脚本哈希较 `.build-state` 发生变化时才触发构建与 Release 发布。
+- **定时检查（`schedule`）**：每天 UTC `13:23`（北京时间 `21:23`）错峰查询零协最新 Release，仅当上游版本号或本地表/脚本哈希较 `.build-state` 发生变化时才触发构建与 Release 发布。
+- **失败告警与自动差分**：当零协新增字符导致闭环校验失败时，流水线会自动拉取 `ghcruise` 最新包生成差分建议，并创建或去重更新带有 `glyph-sync-alert` 标签的 GitHub Issue（待构建恢复正常后自动关闭）。
 - **手动触发（`workflow_dispatch`）**：支持传入自定义 `source_url`、`force_rebuild`（强制重建）以及 `publish_release`（是否创建/更新 Release）。
 
 ---
