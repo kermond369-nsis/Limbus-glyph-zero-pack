@@ -220,24 +220,38 @@ jobs:
         if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.publish_release) }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZTAG: ${{ needs.check.outputs.zero_tag }}
+          MAPVER: ${{ needs.check.outputs.map_version }}
         run: |
           set -euo pipefail
-          ZTAG="${{ needs.check.outputs.zero_tag }}"
           TAG="jp-${ZTAG}"
-          MAPVER="${{ needs.check.outputs.map_version }}"
-          NOTES="自动构建：零协源 \`${ZTAG}\` · 表版本 \`${MAPVER}\` · 构建时间 $(date -u '+%Y-%m-%d %H:%M UTC')
+          python3 - <<'PY' > release_notes.md
+          import os, textwrap
+          from datetime import datetime, timezone
 
-          - \`jp.zip\`：安卓全树包（Android/data/.../Localize/jp/**），解压后覆盖到游戏目录
-          - \`jp.zip.sha256\`：校验
-          - \`jp.zip.report.json\`：替换统计报告
+          ztag = os.environ["ZTAG"]
+          mapver = os.environ["MAPVER"]
+          now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+          print(textwrap.dedent(f"""\
+          自动构建：零协源 `{ztag}` · 表版本 `{mapver}` · 构建时间 {now}
 
-          文本内容来自零协（CC BY-NC-SA 4.0）；字形替换表为本仓自维护。"
+          ### 产物说明
+          - `jp.zip`：安卓全树包（`Android/data/com.ProjectMoon.LimbusCompany/files/Assets/Resources_moved/Localize/jp/**`），解压合并至内部存储根目录即可
+          - `jp.zip.sha256`：SHA-256 完整性校验文件
+          - `jp.zip.report.json`：替换命中统计与 `safe_charset` 闭环校验报告
+
+          ### 上游归属、修改声明与许可
+          - **上游译文**：[LocalizeLimbusCompany（都市零协会）](https://github.com/LocalizeLimbusCompany/LocalizeLimbusCompany)（[官网](https://www.zeroasso.top)），遵循 [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) 协议（**禁止商用，二次分发须保留署名并采用相同协议**）
+          - **字形行为参照**：[ghcruise/LimbusCompany-IOS-Localization](https://github.com/ghcruise/LimbusCompany-IOS-Localization)、[pzwboy/LocalizeLimbusCompanyForAndroid](https://github.com/pzwboy/LocalizeLimbusCompanyForAndroid)
+          - **修改声明**：基于零协 `LLC_zh-CN` 原文执行自动化日语字形替换与 `JP_` 安卓目录重打包，未更改译文原意
+          - **完整声明与源码协议**：仓库脚本与映射表遵循 MIT 协议，详见 [THIRD_PARTY_NOTICES.md](https://github.com/kermond369-nsis/Limbus-glyph-zero-pack/blob/main/THIRD_PARTY_NOTICES.md)"""))
+          PY
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" --clobber jp.zip jp.zip.sha256 jp.zip.report.json
-            gh release edit "$TAG" --notes "$NOTES"
+            gh release edit "$TAG" --notes-file release_notes.md
             echo "release $TAG updated (clobber)"
           else
-            gh release create "$TAG" --title "jp.zip · 零协 $ZTAG" --notes "$NOTES" \
+            gh release create "$TAG" --title "jp.zip · 零协 $ZTAG" --notes-file release_notes.md \
               jp.zip jp.zip.sha256 jp.zip.report.json
             echo "release $TAG created"
           fi

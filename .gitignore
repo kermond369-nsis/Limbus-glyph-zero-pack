@@ -7,6 +7,9 @@ venv/
 # Build outputs
 jp.zip
 jp.zip.sha256
+jp.zip.report.json
+localize_jp.zip
+ghcruise*.zip
 source.pack
 source_in/
 extracted/

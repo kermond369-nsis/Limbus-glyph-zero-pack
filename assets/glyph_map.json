@@ -1,6 +1,6 @@
 {
-  "version": "2026-09-21.full8",
-  "comment": "Rebuilt glyph map (full8). Source behavior: ghcruise/pzwboy replacement logic (extracted 2026-09-21). 1418+6 single-char entries + 8+12 phrase rules. 2026-09-21: added 6 single + 12 phrase entries for chars new in 零协 release 2026092101 (啭胫铮缮讼珂 + 楷模/绗縫/熨煬/結痂/卤素灯/和蔼/武運昌隆/号啕大哭/鞋楦/藐視/一拃). Validation: closure over LLC_zh-CN corpora (2026090501 & 2026092101) = 0 chars outside safe charset (non-ASCII).",
+  "version": "2026-11-20.full9",
+  "comment": "Rebuilt glyph map (full9). Source behavior: ghcruise/pzwboy replacement logic. 1443 single-char entries + 20 phrase rules = 1463 total entries. 2026-11-20: incremental update against 零协 2026111901 & ghcruise v1.119.1-alpha (+18 single-char mappings: 菈焗锹阉嘬〜挎铬缟蘑菇戗阖搂苯硌鳃睑 + 1 zero-width strip rule U+200C->\").",
   "map": {
     "《": "「",
     "》": "」",
@@ -1445,6 +1445,25 @@
     "熨烫": "平整",
     "武运昌隆": "武運長久",
     "嚎啕大哭": "放声大哭",
-    "藐视": "蔑視"
+    "藐视": "蔑視",
+    "菈": "拉",
+    "焗": "燉",
+    "锹": "鍬",
+    "阉": "閹",
+    "嘬": "撮",
+    "〜": "～",
+    "挎": "跨",
+    "铬": "革",
+    "缟": "縞",
+    "蘑": "菌",
+    "菇": "子",
+    "戗": "襟",
+    "阖": "闔",
+    "搂": "挽",
+    "苯": "本",
+    "硌": "挌",
+    "鳃": "鰓",
+    "睑": "瞼",
+    "‌": ""
   }
 }

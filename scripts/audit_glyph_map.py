@@ -28,7 +28,9 @@ DEFAULT_MAP = ROOT / "assets/glyph_map.json"
 DEFAULT_SAFE = ROOT / "assets/safe_charset.txt"
 
 # full-width symbols we intentionally allow as single-char keys
-FULLWIDTH_OK = set("《》＆；？！，。、：；“”‘’（）【】—…")
+FULLWIDTH_OK = set("《》＆；？！，。、：；“”‘’（）【】—…〜")
+# stray zero-width control chars that are explicitly stripped (-> "")
+STRIP_CONTROL_OK = {"\u200c", "\u200b"}
 
 def is_cjk(ch: str) -> bool:
     o = ord(ch)
@@ -60,7 +62,7 @@ def main() -> None:
 
     # 1. key sanity
     for k in single:
-        if not (is_cjk(k) or k in FULLWIDTH_OK):
+        if not (is_cjk(k) or k in FULLWIDTH_OK or (k in STRIP_CONTROL_OK and single[k] == "")):
             warns.append(f"single-char key not CJK/fullwidth: {k!r} -> {single[k]!r}")
     # 2. value chars must be inside safe charset (or hangul/ascii, which are inherently allowed)
     for k, v in gm.items():
